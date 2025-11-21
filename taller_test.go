@@ -2,13 +2,12 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
 
-// ------------------------------
-// Resultado de una simulación
-// ------------------------------
+// RESULTADOS DE SIMULACIÓN
 
 type ResultadoSimulacion struct {
 	Nombre       string
@@ -16,74 +15,61 @@ type ResultadoSimulacion struct {
 	NumMecMec    int
 	NumMecElec   int
 	NumMecCarr   int
-	DuracionReal time.Duration // tiempo real de la simulación
-	TiempoMedio  float64       // tiempo medio por coche (segundos simulados)
+	DuracionReal time.Duration
+	TiempoMedio  float64
 }
 
-// ------------------------------
-// Worker por tipo de incidencia
-// ------------------------------
+// WORKERS
 
-func workerTipo(duracionSeg int, unidad time.Duration, ch <-chan *Vehiculo, done chan<- *Vehiculo) {
+func workerTipo(segundos int, unidad time.Duration, ch <-chan *Vehiculo, done chan<- *Vehiculo) {
 	for v := range ch {
-		// simulamos trabajo
-		time.Sleep(time.Duration(duracionSeg) * unidad)
-		v.TiempoAtencion += duracionSeg
+		time.Sleep(time.Duration(segundos) * unidad)
+		v.TiempoAtencion += segundos
 		done <- v
 	}
 }
 
-// ------------------------------
-// Motor de simulación genérico (SIN reencolar por prioridad)
-// ------------------------------
+// MOTOR DE SIMULACIÓN BASE
 
-// vehiculos: lista de vehículos ya creados con su incidencia.Tipo
-// numMecMec / numMecElec / numMecCarr: nº de mecánicos de cada especialidad
 func ejecutarSimulacionEscenario(nombre string, vehiculos []*Vehiculo,
 	numMecMec, numMecElec, numMecCarr int) ResultadoSimulacion {
 
-	// 1 "segundo simulado" = 100 ms reales (puedes ajustar)
+	// 100 ms = 1 segundo simulado
 	unidad := 100 * time.Millisecond
 
 	chMec := make(chan *Vehiculo, len(vehiculos)*2)
 	chElec := make(chan *Vehiculo, len(vehiculos)*2)
 	chCarr := make(chan *Vehiculo, len(vehiculos)*2)
-	done := make(chan *Vehiculo, len(vehiculos)*2)
-
-	if numMecMec < 0 {
-		numMecMec = 0
-	}
-	if numMecElec < 0 {
-		numMecElec = 0
-	}
-	if numMecCarr < 0 {
-		numMecCarr = 0
-	}
+	done := make(chan *Vehiculo, len(vehiculos)*5)
 
 	// Lanzar workers
 	for i := 0; i < numMecMec; i++ {
-		go workerTipo(5, unidad, chMec, done) // mecánica → 5 s simulados
+		go workerTipo(5, unidad, chMec, done)
 	}
 	for i := 0; i < numMecElec; i++ {
-		go workerTipo(7, unidad, chElec, done) // eléctrica → 7 s
+		go workerTipo(7, unidad, chElec, done)
 	}
 	for i := 0; i < numMecCarr; i++ {
-		go workerTipo(11, unidad, chCarr, done) // carrocería → 11 s
+		go workerTipo(11, unidad, chCarr, done)
 	}
 
-	// Enviar vehículos a su cola
+	// Encolar coches según incidencia
 	for _, v := range vehiculos {
 		inc := v.GetIncidencia()
 		if inc == nil {
 			continue
 		}
-		switch inc.Tipo {
-		case "mecánica":
+
+		tipo := strings.ToLower(strings.TrimSpace(inc.Tipo))
+		switch tipo {
+		case "mecánica", "mecanica":
 			chMec <- v
-		case "eléctrica":
+		case "eléctrica", "electrica":
 			chElec <- v
-		case "carrocería":
+		case "carrocería", "carroceria":
 			chCarr <- v
+		default:
+			fmt.Println("⚠ Incidencia desconocida:", inc.Tipo)
 		}
 	}
 
@@ -91,29 +77,27 @@ func ejecutarSimulacionEscenario(nombre string, vehiculos []*Vehiculo,
 	atendidos := 0
 	start := time.Now()
 
-	// Cada coche se procesa UNA vez (sin reencolar)
+	// NO re-encolamos por prioridad: queremos que el test siempre termine
 	for atendidos < total {
-		<-done
+		v := <-done
+		_ = v // para evitar warning si no lo usamos
 		atendidos++
 	}
 
 	elapsed := time.Since(start)
 
-	// Cerramos canales
 	close(chMec)
 	close(chElec)
 	close(chCarr)
 	close(done)
 
-	// Tiempo medio por coche (en segundos simulados)
+	// Tiempo medio simulado
 	suma := 0
 	for _, v := range vehiculos {
 		suma += v.TiempoAtencion
 	}
-	media := 0.0
-	if total > 0 {
-		media = float64(suma) / float64(total)
-	}
+
+	media := float64(suma) / float64(total)
 
 	return ResultadoSimulacion{
 		Nombre:       nombre,
@@ -126,26 +110,23 @@ func ejecutarSimulacionEscenario(nombre string, vehiculos []*Vehiculo,
 	}
 }
 
-// ------------------------------
-// Construcción de escenarios
-// ------------------------------
+// CREACIÓN DE ESCENARIOS
 
 func crearVehiculosTipoUnico(numCoches int, tipo string) []*Vehiculo {
 	var vs []*Vehiculo
 	for i := 0; i < numCoches; i++ {
 		v := &Vehiculo{
-			Matricula: fmt.Sprintf("TEST-%s-%02d", tipo, i+1),
+			Matricula: fmt.Sprintf("%s-%02d", tipo, i+1),
 			Marca:     "Test",
 			Modelo:    "Sim",
 		}
-		inc := &Incidencia{
+		v.SetIncidencia(&Incidencia{
 			IDIncidencia: i + 1,
 			Tipo:         tipo,
 			Prioridad:    "media",
 			Descripcion:  "simulada",
 			Estado:       "abierta",
-		}
-		v.SetIncidencia(inc)
+		})
 		vs = append(vs, v)
 	}
 	return vs
@@ -155,99 +136,90 @@ func crearVehiculosMixtos(numCoches int) []*Vehiculo {
 	tipos := []string{"mecánica", "eléctrica", "carrocería"}
 	var vs []*Vehiculo
 	for i := 0; i < numCoches; i++ {
-		tipo := tipos[i%len(tipos)]
+		tipo := tipos[i%3]
 		v := &Vehiculo{
 			Matricula: fmt.Sprintf("MIX-%02d", i+1),
 			Marca:     "Test",
 			Modelo:    "Mix",
 		}
-		inc := &Incidencia{
+		v.SetIncidencia(&Incidencia{
 			IDIncidencia: i + 1,
 			Tipo:         tipo,
 			Prioridad:    "media",
 			Descripcion:  "simulada",
 			Estado:       "abierta",
-		}
-		v.SetIncidencia(inc)
+		})
 		vs = append(vs, v)
 	}
 	return vs
 }
 
-// ------------------------------
-// Ejecutor de todos los tests
-// ------------------------------
+// TEST PRINCIPAL
 
-func EjecutarTestsComparativa() {
+func TestComparativasTaller(t *testing.T) {
 	fmt.Println("====================================")
 	fmt.Println("   TESTS DE SIMULACIÓN DEL TALLER   ")
 	fmt.Println("    (goroutines + channels + time)  ")
 	fmt.Println("====================================")
 
-	// 1) Duplicar número de coches (mecánica, misma plantilla)
 	n := 10
-	cochesA := crearVehiculosTipoUnico(n, "mecánica")
-	cochesB := crearVehiculosTipoUnico(2*n, "mecánica")
 
-	res1 := ejecutarSimulacionEscenario("N coches (mecánica)", cochesA, 3, 0, 0)
-	res2 := ejecutarSimulacionEscenario("2N coches (mecánica)", cochesB, 3, 0, 0)
+	// 1) Duplicar nº de coches, misma plantilla
+	res1 := ejecutarSimulacionEscenario("N coches (mecánica)", crearVehiculosTipoUnico(n, "mecánica"), 3, 0, 0)
+	res2 := ejecutarSimulacionEscenario("2N coches (mecánica)", crearVehiculosTipoUnico(2*n, "mecánica"), 3, 0, 0)
 
-	// 2) Duplicar plantilla de mecánicos (misma carga mixta)
-	cochesPlantilla := crearVehiculosMixtos(30)
-	res3 := ejecutarSimulacionEscenario("Plantilla base 1-1-1", cochesPlantilla, 1, 1, 1)
-	res4 := ejecutarSimulacionEscenario("Plantilla doble 2-2-2", cochesPlantilla, 2, 2, 2)
+	// 2) Duplicar plantilla, misma carga
+	mix1 := crearVehiculosMixtos(30)
+	mix2 := crearVehiculosMixtos(30)
+	res3 := ejecutarSimulacionEscenario("Plantilla 1-1-1", mix1, 1, 1, 1)
+	res4 := ejecutarSimulacionEscenario("Plantilla 2-2-2", mix2, 2, 2, 2)
 
-	// 3) Distribución distinta con mismo nº total de mecánicos
-	cochesDist := crearVehiculosMixtos(30)
-	res5 := ejecutarSimulacionEscenario("Distribución 3Mec/1Elec/1Carr", cochesDist, 3, 1, 1)
-	res6 := ejecutarSimulacionEscenario("Distribución 1Mec/3Elec/3Carr", cochesDist, 1, 3, 3)
+	// 3) Distintas distribuciones de especialidad (mismo nº total de mecánicos)
+	dist1 := crearVehiculosMixtos(30)
+	dist2 := crearVehiculosMixtos(30)
+	res5 := ejecutarSimulacionEscenario("3M/1E/1C", dist1, 3, 1, 1)
+	res6 := ejecutarSimulacionEscenario("1M/3E/3C", dist2, 1, 3, 3)
 
-	resultados := []ResultadoSimulacion{res1, res2, res3, res4, res5, res6}
+	fmt.Println("\nRESULTADOS:")
+	printRes(res1)
+	printRes(res2)
+	printRes(res3)
+	printRes(res4)
+	printRes(res5)
+	printRes(res6)
 
-	fmt.Println("\nRESULTADOS (tiempo real ≈ ms, tiempo medio en segundos simulados):")
-	for _, r := range resultados {
-		fmt.Printf("- %-30s | Coches:%2d | MecMec:%2d | MecElec:%2d | MecCarr:%2d | Duración:%4d ms | Tmedio: %.2f s\n",
-			r.Nombre, r.NumCoches, r.NumMecMec, r.NumMecElec, r.NumMecCarr,
-			r.DuracionReal.Milliseconds(), r.TiempoMedio)
-	}
-
-	fmt.Println("\nANÁLISIS PARA LA MEMORIA:")
-
-	fmt.Println("1) Duplicar número de coches (mecánica, plantilla fija 3 mecánicos):")
-	fmt.Printf("   - N coches:   duración ≈ %d ms, tiempo medio ≈ %.2f s\n",
-		res1.DuracionReal.Milliseconds(), res1.TiempoMedio)
-	fmt.Printf("   - 2N coches:  duración ≈ %d ms, tiempo medio ≈ %.2f s\n",
-		res2.DuracionReal.Milliseconds(), res2.TiempoMedio)
-	fmt.Println("   → Al duplicar el número de coches aumenta claramente el tiempo total de procesamiento,")
-	fmt.Println("     mientras que el tiempo medio por vehículo se mantiene cercano al tiempo de atención")
-	fmt.Println("     definido por la incidencia mecánica (≈ 5 s simulados).")
-
-	fmt.Println("\n2) Duplicar plantilla de mecánicos (misma carga mixta):")
-	fmt.Printf("   - Plantilla 1-1-1: duración ≈ %d ms, tiempo medio ≈ %.2f s\n",
-		res3.DuracionReal.Milliseconds(), res3.TiempoMedio)
-	fmt.Printf("   - Plantilla 2-2-2: duración ≈ %d ms, tiempo medio ≈ %.2f s\n",
-		res4.DuracionReal.Milliseconds(), res4.TiempoMedio)
-	fmt.Println("   → Al duplicar el número de mecánicos disminuye el tiempo total para atender toda la cola,")
-	fmt.Println("     porque hay más goroutines trabajando en paralelo, aunque el tiempo medio por coche")
-	fmt.Println("     depende principalmente del tipo de incidencia asignada.")
-
-	fmt.Println("\n3) Distribución de especialidades (mismo nº total de mecánicos):")
-	fmt.Printf("   - 3 Mecánica / 1 Eléctrica / 1 Carrocería: duración ≈ %d ms, Tmedio ≈ %.2f s\n",
-		res5.DuracionReal.Milliseconds(), res5.TiempoMedio)
-	fmt.Printf("   - 1 Mecánica / 3 Eléctrica / 3 Carrocería: duración ≈ %d ms, Tmedio ≈ %.2f s\n",
-		res6.DuracionReal.Milliseconds(), res6.TiempoMedio)
-	fmt.Println("   → Se observa cómo la distribución de especialidades afecta al rendimiento global.")
-	fmt.Println("     En un escenario con carga equilibrada, una plantilla más homogénea tiende a repartir")
-	fmt.Println("     mejor el trabajo. Si predominan incidencias de un tipo concreto, conviene incrementar")
-	fmt.Println("     el número de mecánicos especializados en ese tipo para reducir el tiempo total.")
-
-	fmt.Println("\n(Puedes copiar y adaptar estos comentarios directamente en el PDF de la memoria.)")
+	fmt.Println("\n(Estos datos pueden copiarse directamente a la memoria)")
 }
 
-// ------------------------------
-// Test de Go que llama al ejecutor
-// ------------------------------
+func printRes(r ResultadoSimulacion) {
+	fmt.Printf("- %-20s | Coches:%2d | MecMec:%d | MecElec:%d | MecCarr:%d | Duración:%4d ms | Tmedio: %.2f s\n",
+		r.Nombre, r.NumCoches, r.NumMecMec, r.NumMecElec, r.NumMecCarr,
+		r.DuracionReal.Milliseconds(), r.TiempoMedio)
+}
 
-func TestComparativasTaller(t *testing.T) {
-	EjecutarTestsComparativa()
+// BENCHMARKS
+
+func BenchmarkDuplicarCochesMecanica(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		ejecutarSimulacionEscenario("N coches", crearVehiculosTipoUnico(10, "mecánica"), 3, 0, 0)
+		ejecutarSimulacionEscenario("2N coches", crearVehiculosTipoUnico(20, "mecánica"), 3, 0, 0)
+	}
+}
+
+func BenchmarkDuplicarPlantilla(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		coches1 := crearVehiculosMixtos(30)
+		coches2 := crearVehiculosMixtos(30)
+		ejecutarSimulacionEscenario("1-1-1", coches1, 1, 1, 1)
+		ejecutarSimulacionEscenario("2-2-2", coches2, 2, 2, 2)
+	}
+}
+
+func BenchmarkDistribucionEspecialidades(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		coches1 := crearVehiculosMixtos(30)
+		coches2 := crearVehiculosMixtos(30)
+		ejecutarSimulacionEscenario("3M1E1C", coches1, 3, 1, 1)
+		ejecutarSimulacionEscenario("1M3E3C", coches2, 1, 3, 3)
+	}
 }
